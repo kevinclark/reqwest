@@ -265,10 +265,15 @@ impl RequestBuilder {
     /// ```
     #[cfg(feature = "multipart")]
     #[cfg_attr(docsrs, doc(cfg(feature = "multipart")))]
-    pub fn multipart(self, mut multipart: multipart::Form) -> RequestBuilder {
+    pub fn multipart<T: multipart::MultipartContent>(self, mut multipart: T) -> RequestBuilder {
         let mut builder = self.header(
             CONTENT_TYPE,
-            format!("multipart/form-data; boundary={}", multipart.boundary()).as_str(),
+            format!(
+                "multipart/{}; boundary={}",
+                multipart.subtype(),
+                multipart.boundary()
+            )
+            .as_str(),
         );
 
         builder = match multipart.compute_length() {

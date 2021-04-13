@@ -13,6 +13,18 @@ use futures_util::{future, stream, StreamExt};
 
 use super::Body;
 
+/// Content sendable as multipart/form-data or multipart/mixed
+pub trait MultipartContent {
+    /// The multipart subtype (f.e form-data, mixed)
+    fn subtype(&self) -> &str;
+    /// The encapsulation boundary token (see RFC1341 §7.2.1)
+    fn boundary(&self) -> &str;
+    /// The total length of the content
+    fn compute_length(&mut self) -> Option<u64>;
+    /// Consume this instance and transform into an instance of Body for use in a request.
+    fn stream(self) -> Body;
+}
+
 /// An async multipart/form-data request.
 pub struct Form {
     inner: FormParts<Part>,
@@ -59,12 +71,6 @@ impl Form {
         }
     }
 
-    /// Get the boundary that this form will use.
-    #[inline]
-    pub fn boundary(&self) -> &str {
-        self.inner.boundary()
-    }
-
     /// Add a data field with supplied name and value.
     ///
     /// # Examples
@@ -105,31 +111,6 @@ impl Form {
         self.with_inner(|inner| inner.percent_encode_noop())
     }
 
-    /// Consume this instance and transform into an instance of Body for use in a request.
-    pub(crate) fn stream(mut self) -> Body {
-        if self.inner.fields.is_empty() {
-            return Body::empty();
-        }
-
-        // create initial part to init reduce chain
-        let (name, part) = self.inner.fields.remove(0);
-        let start = Box::pin(self.part_stream(name, part))
-            as Pin<Box<dyn Stream<Item = crate::Result<Bytes>> + Send + Sync>>;
-
-        let fields = self.inner.take_fields();
-        // for each field, chain an additional stream
-        let stream = fields.into_iter().fold(start, |memo, (name, part)| {
-            let part_stream = self.part_stream(name, part);
-            Box::pin(memo.chain(part_stream))
-                as Pin<Box<dyn Stream<Item = crate::Result<Bytes>> + Send + Sync>>
-        });
-        // append special ending boundary
-        let last = stream::once(future::ready(Ok(
-            format!("--{}--\r\n", self.boundary()).into()
-        )));
-        Body::stream(stream.chain(last))
-    }
-
     /// Generate a hyper::Body stream for a single Part instance of a Form request.
     pub(crate) fn part_stream<T>(
         &mut self,
@@ -159,10 +140,6 @@ impl Form {
             .chain(stream::once(future::ready(Ok("\r\n".into()))))
     }
 
-    pub(crate) fn compute_length(&mut self) -> Option<u64> {
-        self.inner.compute_length()
-    }
-
     fn with_inner<F>(self, func: F) -> Self
     where
         F: FnOnce(FormParts<Part>) -> FormParts<Part>,
@@ -176,6 +153,45 @@ impl Form {
 impl fmt::Debug for Form {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.inner.fmt_fields("Form", f)
+    }
+}
+
+impl MultipartContent for Form {
+    fn subtype(&self) -> &str {
+        "form-data"
+    }
+
+    #[inline]
+    fn boundary(&self) -> &str {
+        self.inner.boundary()
+    }
+
+    fn compute_length(&mut self) -> Option<u64> {
+        self.inner.compute_length()
+    }
+
+    fn stream(mut self) -> Body {
+        if self.inner.fields.is_empty() {
+            return Body::empty();
+        }
+
+        // create initial part to init reduce chain
+        let (name, part) = self.inner.fields.remove(0);
+        let start = Box::pin(self.part_stream(name, part))
+            as Pin<Box<dyn Stream<Item = crate::Result<Bytes>> + Send + Sync>>;
+
+        let fields = self.inner.take_fields();
+        // for each field, chain an additional stream
+        let stream = fields.into_iter().fold(start, |memo, (name, part)| {
+            let part_stream = self.part_stream(name, part);
+            Box::pin(memo.chain(part_stream))
+                as Pin<Box<dyn Stream<Item = crate::Result<Bytes>> + Send + Sync>>
+        });
+        // append special ending boundary
+        let last = stream::once(future::ready(Ok(
+            format!("--{}--\r\n", self.boundary()).into()
+        )));
+        Body::stream(stream.chain(last))
     }
 }
 
